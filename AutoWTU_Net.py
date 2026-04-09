@@ -14,26 +14,22 @@ from PIL import Image, ImageTk
 import webbrowser
 import re
 from urllib.parse import urljoin
-import winreg  # 新增：用于Windows注册表操作
+import winreg
 
 
 def get_app_directory():
     """获取应用程序所在目录（exe或脚本所在目录）"""
     if getattr(sys, 'frozen', False):
-        # 打包后的 exe
         return os.path.dirname(sys.executable)
     else:
-        # Python 脚本
         return os.path.dirname(os.path.abspath(__file__))
 
 
-# 设置工作目录为程序所在目录
 APP_DIR = get_app_directory()
 os.chdir(APP_DIR)
 
 
-# ==================== 全局配置 ====================
-DEFAULT_LOCK_PORT = 29666  # 避开常见服务端口，降低冲突概率
+DEFAULT_LOCK_PORT = 29666
 CONFIG_PATH = os.path.join(APP_DIR, "wifi_config.json")
 LOG_PATH = os.path.join(APP_DIR, "debug.log")
 ICON_NAME = "icon.ico"
@@ -46,25 +42,22 @@ current_config = {
     "port": DEFAULT_LOCK_PORT,
     "interval": 5,
     "startup_delay": 5,
-    "auto_start": False  # 新增：开机自启配置项
+    "auto_start": False
 }
 
 stop_event = threading.Event()
-login_lock = threading.Lock()  # 登录锁，防止多线程同时登录
+login_lock = threading.Lock()
 config_window_active = False
 NO_PROXIES = {"http": None, "https": None}
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
-# ==================== 开机自启管理 ====================
 def get_app_path():
     """获取当前程序的完整路径"""
     if getattr(sys, 'frozen', False):
-        # 打包后的exe路径
         return sys.executable
     else:
-        # Python脚本路径
         return os.path.abspath(sys.argv[0])
 
 def is_auto_start_enabled():
@@ -79,7 +72,6 @@ def is_auto_start_enabled():
         )
         try:
             value, _ = winreg.QueryValueEx(key, "AutoWTU")
-            # 注册表中可能是带引号的可执行路径
             startup_path = str(value).strip().strip('"')
             startup_path = os.path.normcase(os.path.normpath(startup_path))
             return startup_path == app_path
@@ -104,7 +96,6 @@ def set_auto_start(enable):
 
         if enable:
             app_path = get_app_path()
-            # 关键：加引号防止空格路径失效
             winreg.SetValueEx(key, "AutoWTU", 0, winreg.REG_SZ, f'"{app_path}"')
             write_log("已设置开机自启")
         else:
@@ -112,7 +103,7 @@ def set_auto_start(enable):
                 winreg.DeleteValue(key, "AutoWTU")
                 write_log("已取消开机自启")
             except FileNotFoundError:
-                pass  # 本来就没有
+                pass
 
         return True
     except Exception as e:
@@ -127,14 +118,12 @@ def toggle_auto_start():
     new_state = not current_config.get("auto_start", False)
     if set_auto_start(new_state):
         current_config["auto_start"] = new_state
-        # 保存到配置文件
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(current_config, f, ensure_ascii=False, indent=2)
         return True
     return False
 
 
-# ==================== 日志 ====================
 def write_log(message):
     """同步写入日志"""
     ts = time.strftime("[%Y-%m-%d %H:%M:%S] ")
@@ -150,14 +139,12 @@ def write_log(message):
 def resource_path(relative_path):
     """兼容 PyInstaller 打包路径"""
     if getattr(sys, 'frozen', False):
-        # 打包后，资源文件在 _MEIPASS 临时目录
         base_path = sys._MEIPASS
     else:
         base_path = APP_DIR
     return os.path.join(base_path, relative_path)
 
 
-# ==================== 配置 ====================
 def load_config():
     global current_config
     if os.path.exists(CONFIG_PATH):
@@ -166,7 +153,6 @@ def load_config():
                 data = json.load(f)
                 if isinstance(data, dict):
                     current_config.update(data)
-                    # 同步注册表状态
                     actual_state = is_auto_start_enabled()
                     if current_config.get("auto_start", False) != actual_state:
                         current_config["auto_start"] = actual_state
@@ -208,7 +194,6 @@ def check_single_instance():
         return False
 
 
-# ==================== 网络检测 ====================
 def is_network_ok():
     """
     多目标联网检测
@@ -239,17 +224,13 @@ def is_network_ok():
     return False
 
 
-# ==================== 认证链接提取 ====================
 def extract_eportal_url_from_html(base_url, html):
     """
     专门针对 JS 强转页面（top.self.location.href 等）进行提取
     """
     patterns = [
-        # 兼容 top.self.location.href / window.location.href / top.location
         r'''(?:top\.self|window|top)\.location(?:\.href)?\s*=\s*["']([^"']+)["']''',
-        # 兼容普通的 location.href
         r'''(?<![\w.])location(?:\.href)?\s*=\s*["']([^"']+)["']''',
-        # meta refresh 标签
         r'''url\s*=\s*["']?([^"'>\s]+)''',
     ]
 
@@ -260,12 +241,10 @@ def extract_eportal_url_from_html(base_url, html):
             full_url = urljoin(base_url, m)
             found_urls.append(full_url)
 
-    # 优先级排序：优先返回带 '?' 的链接，因为认证必须有 queryString
     for url in found_urls:
         if "?" in url and ("index.jsp" in url.lower() or "eportal" in url.lower()):
             return url
 
-    # 次优先级：不带参数但看起来像 portal 的
     for url in found_urls:
         if "eportal" in url.lower():
             return url
@@ -343,7 +322,6 @@ def detect_portal_url(session, headers):
     return fallback_url
 
 
-# ==================== 核心登录逻辑 ====================
 def do_login():
     """
     登录主函数，带互斥锁
@@ -372,28 +350,22 @@ def do_login():
             "Accept-Language": "zh-CN,zh;q=0.9"
         }
 
-        # 1. 探测 portal URL
         target_url = detect_portal_url(session, headers)
 
         if not target_url:
             return "无法探测到认证页面，请确认已连接校园网 WiFi"
 
-        # 如果捕获到成功页面的网址，直接判定成功，不发 POST
         lower_target = target_url.lower()
         if "success.jsp" in lower_target or "redirectortosuccess" in lower_target:
             write_log(f"检测到已在线网址: {target_url}")
             return "已成功连接到校园网 (检测到成功页)"
 
-        # 过滤占位页：如果抓到的是那个没有参数的网址且不包含上述关键词，说明提取失败
         if "?" not in target_url:
             return f"获取到的 URL 缺少参数: {target_url}"
 
-        # 2. 提交登录
         try:
-            # 提取 ? 后的所有参数
             qs = target_url.split("?", 1)[1]
 
-            # Referer 必须是刚才抓到的完整 URL，某些服务器强制校验
             headers.update({
                 "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
                 "Referer": target_url,
@@ -425,7 +397,6 @@ def do_login():
             res_text = response.text
             write_log(f"服务器响应正文: {res_text[:200]}")
 
-            # 优先 JSON 解析
             try:
                 j = response.json()
                 result = str(j.get("result", "")).lower()
@@ -439,7 +410,6 @@ def do_login():
                     return f"登录失败: {msg}"
 
             except Exception:
-                # 文本兜底解析
                 text = res_text.lower()
                 if '"result":"success"' in text or "success" in text:
                     return "登录成功"
@@ -454,7 +424,6 @@ def do_login():
         login_lock.release()
 
 
-# ==================== 界面 ====================
 def show_config_window():
     global config_window_active
     if config_window_active:
@@ -477,7 +446,6 @@ def show_config_window():
 
     root.protocol("WM_DELETE_WINDOW", on_close)
 
-    # 顶部图片
     try:
         img_raw = Image.open(resource_path(TITLE_IMG))
         tw = 380
@@ -486,7 +454,7 @@ def show_config_window():
         label_img = tk.Label(root, image=img_tk)
         label_img.image = img_tk  # 防止被回收
         label_img.pack()
-        root.geometry(f"380x{470 + th}")  # 增加高度以容纳新控件
+        root.geometry(f"380x{470 + th}")
     except Exception:
         root.geometry("380x560")
 
@@ -524,30 +492,26 @@ def show_config_window():
     port_v = tk.StringVar(value=str(current_config.get("port", DEFAULT_LOCK_PORT)))
     tk.Entry(frame, textvariable=port_v, width=25).grid(row=4, column=1)
 
-    # 新增：开机自启复选框
     auto_start_var = tk.BooleanVar(value=current_config.get("auto_start", False))
     tk.Checkbutton(
         frame,
         text="开机自动启动",
         variable=auto_start_var,
-        command=lambda: None  # 点击时不立即执行，保存时才应用
+        command=lambda: None
     ).grid(row=5, column=1, pady=10, sticky="w")
 
     def thread_test():
         def _run():
             try:
                 btn_test.config(state="disabled", text="正在探测...")
-                # 测试时不保存配置，只使用当前输入
                 temp_uid = u_v.get()
                 temp_pwd = p_v.get()
                 temp_serv = carrier_map[s_v.get()]
 
-                # 临时保存原始配置
                 orig_uid = current_config.get("userId", "")
                 orig_pwd = current_config.get("password", "")
                 orig_serv = current_config.get("service", "DX")
 
-                # 临时修改配置用于测试
                 current_config["userId"] = temp_uid
                 current_config["password"] = temp_pwd
                 current_config["service"] = temp_serv
@@ -556,7 +520,6 @@ def show_config_window():
                 write_log(f"[手动测试] 登录结果: {res}")
                 messagebox.showinfo("测试结果", res)
 
-                # 恢复原配置
                 current_config["userId"] = orig_uid
                 current_config["password"] = orig_pwd
                 current_config["service"] = orig_serv
@@ -573,7 +536,6 @@ def show_config_window():
         try:
             auto_start = auto_start_var.get()
 
-            # 保存配置
             save_config(
                 u_v.get(),
                 p_v.get(),
@@ -583,7 +545,6 @@ def show_config_window():
                 auto_start
             )
 
-            # 应用开机自启设置
             if auto_start != is_auto_start_enabled():
                 set_auto_start(auto_start)
 
@@ -610,11 +571,9 @@ def show_config_window():
     root.mainloop()
 
 
-# ==================== 后台守护 ====================
 def worker():
     write_log("=== 后台守护线程开启 ===")
 
-    # 给系统和 WiFi 留出初始化时间，避免开机瞬间探测失败
     delay_seconds = max(0, int(current_config.get("startup_delay", 5)))
     if delay_seconds > 0:
         write_log(f"启动延迟 {delay_seconds} 秒，等待网络初始化...")
@@ -634,7 +593,6 @@ def worker():
         except Exception as e:
             write_log(f"后台守护异常: {e}")
 
-        # 按分钟间隔等待
         wait_seconds = max(1, int(current_config.get("interval", 5)) * 60)
         for _ in range(wait_seconds):
             if stop_event.is_set():
@@ -642,7 +600,6 @@ def worker():
             time.sleep(1)
 
 
-# ==================== 托盘 ====================
 def run_tray():
     try:
         img = Image.open(resource_path(ICON_NAME))
@@ -663,33 +620,28 @@ def run_tray():
         write_log(f"[托盘测试] {result}")
 
     def toggle_startup():
-        """托盘菜单中的开机自启切换"""
         if toggle_auto_start():
             state = "已启用" if current_config["auto_start"] else "已禁用"
             write_log(f"开机自启{state}")
-            # 这里无法动态更新菜单文字，但功能已生效
         else:
             write_log("开机自启设置失败")
 
     menu = pystray.Menu(
         item("AutoWTU 校园网助手", lambda: None, enabled=False),
-        item("设置中心", open_settings, default=True),  # default=True 让双击/单击触发此项
+        item("设置中心", open_settings, default=True),
         item("立即测试登录", lambda: threading.Thread(target=test_login, daemon=True).start()),
         item("开机自启", toggle_startup, checked=lambda item: current_config.get("auto_start", False)),
         item("退出程序", on_exit)
     )
 
-    # action 参数确保左键单击也能触发默认菜单项
     pystray.Icon("AutoWTU", img, "校园网自动重连助手", menu, action=lambda: open_settings()).run()
 
 
-# ==================== 主入口 ====================
 def main():
     write_log("=== AutoWTU 启动 ===")
 
     load_config()
 
-    # 确保注册表状态与配置一致
     config_auto = current_config.get("auto_start", False)
     actual_auto = is_auto_start_enabled()
     if config_auto != actual_auto:
@@ -698,19 +650,15 @@ def main():
     if not check_single_instance():
         return
 
-    # 首次无配置，弹设置
     if not current_config.get("userId"):
         show_config_window()
 
-    # 如果用户关掉窗口后仍未配置，退出
     if not current_config.get("userId"):
         write_log("未配置账号，程序退出。")
         return
 
-    # 启动后台守护
     threading.Thread(target=worker, daemon=True).start()
 
-    # 启动托盘
     run_tray()
 
 
