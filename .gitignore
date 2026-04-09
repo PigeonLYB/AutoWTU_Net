@@ -1,0 +1,49 @@
+# Python cache and bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE settings
+.idea/
+.vscode/
+
+# Build artifacts
+build/
+dist/
+*.spec
+
+# Runtime local files
+wifi_config.json
+debug.log
+
+# Temporary backups
+_local_backup_*/
+# Python cache and bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE settings
+.idea/
+.vscode/
+# Build artifacts
+build/
+dist/
+*.spec
+
+# Runtime local files
+wifi_config.json
+debug.log
+
+# Temporary backups
+_local_backup_*/
