@@ -18,7 +18,7 @@ import winreg
 
 
 def get_app_directory():
-    """获取应用程序所在目录（exe或脚本所在目录）"""
+    """返回程序目录，兼容脚本模式与 PyInstaller 打包模式。"""
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
     else:
@@ -41,7 +41,7 @@ current_config = {
     "service": "DX",
     "port": DEFAULT_LOCK_PORT,
     "interval": 5,
-    "startup_delay": 5,
+    "startup_delay": 30,
     "auto_start": False
 }
 
@@ -54,14 +54,14 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 def get_app_path():
-    """获取当前程序的完整路径"""
+    """返回当前启动入口路径，用于注册表开机自启项校验。"""
     if getattr(sys, 'frozen', False):
         return sys.executable
     else:
         return os.path.abspath(sys.argv[0])
 
 def is_auto_start_enabled():
-    """检查是否已设置开机自启"""
+    """检查注册表开机自启是否已指向当前程序。"""
     try:
         app_path = os.path.normcase(os.path.normpath(get_app_path()))
         key = winreg.OpenKey(
@@ -84,7 +84,7 @@ def is_auto_start_enabled():
         return False
 
 def set_auto_start(enable):
-    """设置或取消开机自启"""
+    """写入或删除 Windows 开机自启注册表项。"""
     key = None
     try:
         key = winreg.OpenKey(
@@ -114,7 +114,7 @@ def set_auto_start(enable):
             winreg.CloseKey(key)
 
 def toggle_auto_start():
-    """切换开机自启状态"""
+    """切换开机自启并立即同步写入配置文件。"""
     new_state = not current_config.get("auto_start", False)
     if set_auto_start(new_state):
         current_config["auto_start"] = new_state
@@ -125,7 +125,7 @@ def toggle_auto_start():
 
 
 def write_log(message):
-    """同步写入日志"""
+    """输出控制台日志，并追加写入 debug.log。"""
     ts = time.strftime("[%Y-%m-%d %H:%M:%S] ")
     msg = ts + str(message)
     print(msg)
@@ -137,7 +137,7 @@ def write_log(message):
 
 
 def resource_path(relative_path):
-    """兼容 PyInstaller 打包路径"""
+    """解析资源路径，兼容 PyInstaller 的 _MEIPASS 临时目录。"""
     if getattr(sys, 'frozen', False):
         base_path = sys._MEIPASS
     else:
@@ -146,6 +146,7 @@ def resource_path(relative_path):
 
 
 def load_config():
+    """加载配置文件，并校准 auto_start 与注册表实际状态。"""
     global current_config
     if os.path.exists(CONFIG_PATH):
         try:
@@ -163,14 +164,16 @@ def load_config():
     return False
 
 
-def save_config(uid, pwd, serv, port, interval, auto_start=None):
+def save_config(uid, pwd, serv, port, interval, startup_delay, auto_start=None):
+    """保存用户配置；startup_delay 的单位为秒。"""
     global current_config
     current_config.update({
         "userId": uid.strip(),
         "password": pwd,
         "service": serv,
         "port": int(port),
-        "interval": int(interval)
+        "interval": int(interval),
+        "startup_delay": int(startup_delay)
     })
     if auto_start is not None:
         current_config["auto_start"] = auto_start
@@ -180,7 +183,7 @@ def save_config(uid, pwd, serv, port, interval, auto_start=None):
 
 
 def check_single_instance():
-    """防多开：绑定本地端口"""
+    """通过本地端口锁防止重复启动。"""
     try:
         global _lock_socket
         _lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -195,9 +198,7 @@ def check_single_instance():
 
 
 def is_network_ok():
-    """
-    多目标联网检测
-    """
+    """进行轻量联网探测，判断当前是否已可正常外网访问。"""
     tests = [
         ("http://www.msftconnecttest.com/connecttest.txt", "Microsoft Connect Test"),
         ("http://connectivitycheck.gstatic.com/generate_204", None),
@@ -225,9 +226,7 @@ def is_network_ok():
 
 
 def extract_eportal_url_from_html(base_url, html):
-    """
-    专门针对 JS 强转页面（top.self.location.href 等）进行提取
-    """
+    """从 HTML/JS 跳转脚本中提取 ePortal 认证入口地址。"""
     patterns = [
         r'''(?:top\.self|window|top)\.location(?:\.href)?\s*=\s*["']([^"']+)["']''',
         r'''(?<![\w.])location(?:\.href)?\s*=\s*["']([^"']+)["']''',
@@ -253,7 +252,6 @@ def extract_eportal_url_from_html(base_url, html):
 
 
 def dump_probe_debug(resp):
-    """记录探测响应的关键信息"""
     try:
         write_log(f"响应头: {dict(resp.headers)}")
     except Exception:
@@ -268,9 +266,7 @@ def dump_probe_debug(resp):
 
 
 def detect_portal_url(session, headers):
-    """
-    强化版探测：专门对付 200 状态码 + JS 跳转的校园网
-    """
+    """探测认证入口，优先返回带 queryString 参数的 URL。"""
     probe_urls = [
         "http://www.msftconnecttest.com/connecttest.txt",
         "http://connectivitycheck.gstatic.com/generate_204",
@@ -285,7 +281,6 @@ def detect_portal_url(session, headers):
     for url in probe_urls:
         try:
             write_log(f"探测: {url}")
-            # 允许跟随跳转，有些出口可能中途有 302
             resp = session.get(
                 url,
                 headers=headers,
@@ -294,12 +289,11 @@ def detect_portal_url(session, headers):
                 proxies=NO_PROXIES
             )
 
-            # 1. 最终 URL 已经直接带参数了
             if "?" in resp.url and ("index.jsp" in resp.url.lower() or "eportal" in resp.url.lower()):
                 write_log(f"通过跳转直接获取 URL: {resp.url}")
                 return resp.url
 
-            # 2. 检查返回的 HTML 源码里有没有 JS 跳转
+            # 部分校园网会返回 200 页面，再通过 JS location 跳转。
             text = resp.text or ""
             html_url = extract_eportal_url_from_html(resp.url, text)
             if html_url:
@@ -308,7 +302,6 @@ def detect_portal_url(session, headers):
                     return html_url
                 fallback_url = html_url
 
-            # 3. 备用检查 30x 重定向的 Header
             loc = resp.headers.get("Location")
             if loc:
                 full_loc = urljoin(resp.url, loc)
@@ -323,9 +316,7 @@ def detect_portal_url(session, headers):
 
 
 def do_login():
-    """
-    登录主函数，带互斥锁
-    """
+    """执行一次登录流程；互斥锁可避免并发重复提交登录请求。"""
     if not login_lock.acquire(blocking=False):
         return "已有登录任务正在执行..."
 
@@ -364,6 +355,7 @@ def do_login():
             return f"获取到的 URL 缺少参数: {target_url}"
 
         try:
+            # queryString 为网关接口必需参数，来自认证入口 URL 的查询串。
             qs = target_url.split("?", 1)[1]
 
             headers.update({
@@ -425,6 +417,7 @@ def do_login():
 
 
 def show_config_window():
+    """配置窗口：账号、运营商、检测间隔、开机延时、自启动。"""
     global config_window_active
     if config_window_active:
         return
@@ -452,11 +445,11 @@ def show_config_window():
         th = int(tw / (img_raw.size[0] / img_raw.size[1]))
         img_tk = ImageTk.PhotoImage(img_raw.resize((tw, th), Image.Resampling.LANCZOS))
         label_img = tk.Label(root, image=img_tk)
-        label_img.image = img_tk  # 防止被回收
+        label_img.image = img_tk  # 保持引用，避免 Tk 图片被回收后不显示。
         label_img.pack()
-        root.geometry(f"380x{470 + th}")
+        root.geometry(f"380x{520 + th}")
     except Exception:
-        root.geometry("380x560")
+        root.geometry("380x610")
 
     frame = tk.Frame(root)
     frame.pack(pady=10)
@@ -492,15 +485,21 @@ def show_config_window():
     port_v = tk.StringVar(value=str(current_config.get("port", DEFAULT_LOCK_PORT)))
     tk.Entry(frame, textvariable=port_v, width=25).grid(row=4, column=1)
 
+    tk.Label(frame, text="开机启动延时(秒):").grid(row=5, column=0, pady=5, sticky="e")
+    startup_delay_v = tk.StringVar(value=str(current_config.get("startup_delay", 30)))
+    tk.Spinbox(frame, from_=0, to=3600, textvariable=startup_delay_v, width=23).grid(row=5, column=1)
+    tk.Label(frame, text="(0-3600秒, 等待网络稳定)", font=("", 8), fg="gray").grid(row=6, column=1, sticky="w")
+
     auto_start_var = tk.BooleanVar(value=current_config.get("auto_start", False))
     tk.Checkbutton(
         frame,
         text="开机自动启动",
         variable=auto_start_var,
         command=lambda: None
-    ).grid(row=5, column=1, pady=10, sticky="w")
+    ).grid(row=7, column=1, pady=10, sticky="w")
 
     def thread_test():
+        """使用当前输入做一次即时登录测试，不覆盖已保存配置。"""
         def _run():
             try:
                 btn_test.config(state="disabled", text="正在探测...")
@@ -542,6 +541,7 @@ def show_config_window():
                 carrier_map[s_v.get()],
                 port_v.get(),
                 i_v.get(),
+                startup_delay_v.get(),
                 auto_start
             )
 
@@ -572,9 +572,11 @@ def show_config_window():
 
 
 def worker():
+    """后台守护：按间隔检测网络，离线则自动尝试登录。"""
     write_log("=== 后台守护线程开启 ===")
 
-    delay_seconds = max(0, int(current_config.get("startup_delay", 5)))
+    # 开机初期网络常未稳定，按配置延时后再进入探测逻辑。
+    delay_seconds = max(0, min(3600, int(current_config.get("startup_delay", 30))))
     if delay_seconds > 0:
         write_log(f"启动延迟 {delay_seconds} 秒，等待网络初始化...")
         for _ in range(delay_seconds):
@@ -601,6 +603,7 @@ def worker():
 
 
 def run_tray():
+    """初始化系统托盘菜单并进入事件循环。"""
     try:
         img = Image.open(resource_path(ICON_NAME))
     except Exception:
@@ -638,6 +641,7 @@ def run_tray():
 
 
 def main():
+    """程序入口：加载配置、单实例检查、启动守护线程和托盘。"""
     write_log("=== AutoWTU 启动 ===")
 
     load_config()
